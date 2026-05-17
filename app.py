@@ -159,7 +159,7 @@ with col_title:
 with col_desc:
     st.markdown("")
     st.caption(
-        "Open-source alternative to ArcGIS Pro 3.7 Embeddings-Based Analysis.  \n"
+        "Open-source alternative to Commerical Embeddings-Based Analysis.  \n"
         "Transform NAIP imagery into AI embeddings, then find visually similar locations."
     )
 st.markdown("---")

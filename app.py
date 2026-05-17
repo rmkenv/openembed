@@ -1,7 +1,7 @@
 """
 NAIP Embeddings-Based Similarity Search
 ========================================
-Open-source alternative to Commercial Embeddings-Based Analysis GeoAI tools
+Open-source alternative to ArcGIS Pro 3.7 Embeddings-Based Analysis GeoAI toolset.
 
 Pipeline
 --------
@@ -49,7 +49,7 @@ from utils.embeddings import (
     load_embeddings,
     umap_project,
 )
-from utils.viz import build_result_map, build_umap_scatter
+from utils.viz import build_draw_map, build_result_map, build_umap_scatter
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -115,14 +115,17 @@ st.markdown("""
     font-family: 'Space Mono', monospace; font-size: 0.8rem;
     transition: all 0.15s ease;
   }
-  .stButton > button:hover {
-    background: #238636; color: #ffffff; border-color: #238636;
-  }
+  .stButton > button:hover { background: #238636; color: #fff; border-color: #238636; }
   div[data-testid="stExpander"] {
     background: #161b22; border: 1px solid #21262d; border-radius: 8px;
   }
   .stDataFrame { font-size: 0.82rem; }
   .stAlert { border-radius: 8px; }
+  .bbox-display {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 6px 12px; font-family: 'Space Mono', monospace;
+    font-size: 0.75rem; color: #58a6ff; margin-top: 6px;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -143,6 +146,27 @@ for k in _STATE_KEYS:
 @st.cache_resource(show_spinner=False)
 def _load_model():
     return load_model()
+
+
+# ── Bbox extraction helper ────────────────────────────────────────────────────
+def _extract_bbox_from_drawing(map_data: dict) -> list[float] | None:
+    """
+    Parse bbox [W, S, E, N] from st_folium return value after user draws a rectangle.
+    folium.plugins.Draw returns GeoJSON in map_data["all_drawings"].
+    """
+    try:
+        drawings = map_data.get("all_drawings") or []
+        if not drawings:
+            return None
+        geom = drawings[-1].get("geometry", {})
+        if geom.get("type") != "Polygon":
+            return None
+        coords = geom["coordinates"][0]  # list of [lng, lat] pairs
+        lngs = [c[0] for c in coords]
+        lats = [c[1] for c in coords]
+        return [min(lngs), min(lats), max(lngs), max(lats)]  # W, S, E, N
+    except Exception:
+        return None
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -166,27 +190,10 @@ st.markdown("---")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR
+# SIDEBAR — parameters only (no bbox inputs)
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
-    st.markdown('<p class="section-header">Area of Interest</p>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        west  = st.number_input("West",  value=config.DEFAULT_BBOX["west"],  format="%.4f", step=0.01)
-        south = st.number_input("South", value=config.DEFAULT_BBOX["south"], format="%.4f", step=0.01)
-    with c2:
-        east  = st.number_input("East",  value=config.DEFAULT_BBOX["east"],  format="%.4f", step=0.01)
-        north = st.number_input("North", value=config.DEFAULT_BBOX["north"], format="%.4f", step=0.01)
-
-    bbox      = [west, south, east, north]
-    bbox_area = (east - west) * (north - south)
-
-    if bbox_area <= 0:
-        st.error("Invalid bounding box.")
-    elif bbox_area > 0.5:
-        st.warning("⚠️ Large AOI — may generate many chips.")
 
     st.markdown('<p class="section-header">Imagery</p>', unsafe_allow_html=True)
     year = st.selectbox("NAIP Year", config.NAIP_YEARS, index=2)
@@ -201,8 +208,29 @@ with st.sidebar:
     show_umap = st.checkbox("Show UMAP embedding space", value=True)
 
     st.markdown("---")
-    search_btn = st.button("🔍 Search NAIP Scenes", use_container_width=True)
-    build_btn  = st.button(
+
+    # Current bbox readout
+    if st.session_state.bbox:
+        w, s, e, n = st.session_state.bbox
+        st.markdown(
+            f'<div class="bbox-display">'
+            f'W {w:.4f}  E {e:.4f}<br>S {s:.4f}  N {n:.4f}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        bbox_area = (e - w) * (n - s)
+        if bbox_area > 0.5:
+            st.warning("⚠️ Large AOI — may generate many chips.")
+    else:
+        st.caption("🖊️ Draw a rectangle on the map to set your AOI.")
+
+    st.markdown("---")
+    search_btn = st.button(
+        "🔍 Search NAIP Scenes",
+        use_container_width=True,
+        disabled=(st.session_state.bbox is None),
+    )
+    build_btn = st.button(
         "⚙️ Build Index",
         use_container_width=True,
         disabled=(st.session_state.scenes is None),
@@ -216,11 +244,63 @@ with st.sidebar:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# STEP 0 — Draw AOI map (always visible at top)
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown('<p class="section-header">00 · Draw Your Area of Interest</p>', unsafe_allow_html=True)
+st.caption("Use the rectangle tool (top-left of map) to draw your AOI. Then click **Search NAIP Scenes** in the sidebar.")
+
+# Determine map center — use existing bbox centroid if available
+if st.session_state.bbox:
+    w, s, e, n = st.session_state.bbox
+    map_center = ((s + n) / 2, (w + e) / 2)
+    map_zoom   = 12
+else:
+    map_center = (config.DEFAULT_BBOX["south"] + (config.DEFAULT_BBOX["north"] - config.DEFAULT_BBOX["south"]) / 2,
+                  config.DEFAULT_BBOX["west"]  + (config.DEFAULT_BBOX["east"]  - config.DEFAULT_BBOX["west"])  / 2)
+    map_zoom   = 10
+
+draw_map = build_draw_map(
+    center=map_center,
+    zoom=map_zoom,
+    existing_bbox=st.session_state.bbox,
+)
+
+map_data = st_folium(
+    draw_map,
+    width="100%",
+    height=420,
+    returned_objects=["all_drawings"],
+    key="aoi_draw_map",
+)
+
+# Parse drawn rectangle → update session bbox
+drawn_bbox = _extract_bbox_from_drawing(map_data)
+if drawn_bbox:
+    w, s, e, n = drawn_bbox
+    if (e - w) > 0 and (n - s) > 0:
+        if drawn_bbox != st.session_state.bbox:
+            st.session_state.bbox = drawn_bbox
+            # Reset downstream when AOI changes
+            for k in ["scenes", "selected_scene", "ds", "chips", "positions",
+                       "embeddings", "faiss_index", "chip_gdf",
+                       "query_idx", "results", "umap_proj", "scene_id"]:
+                st.session_state[k] = None
+            st.rerun()
+
+if st.session_state.bbox:
+    w, s, e, n = st.session_state.bbox
+    st.success(f"✅ AOI set — W:{w:.4f} S:{s:.4f} E:{e:.4f} N:{n:.4f}")
+else:
+    st.info("No AOI drawn yet.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Search scenes
 # ══════════════════════════════════════════════════════════════════════════════
 if search_btn:
-    if bbox_area <= 0:
-        st.error("Fix the bounding box before searching.")
+    bbox = st.session_state.bbox
+    if not bbox:
+        st.error("Draw an AOI on the map first.")
         st.stop()
 
     with st.spinner("📡 Querying Planetary Computer STAC…"):
@@ -234,13 +314,11 @@ if search_btn:
     if not scenes:
         st.error(
             f"No NAIP scenes found for this AOI in {year}. "
-            "Try a different year or larger extent."
+            "Try a different year or draw a larger extent."
         )
         st.stop()
 
     st.session_state.scenes = scenes
-    st.session_state.bbox   = bbox
-    # Reset downstream state when AOI/year changes
     for k in ["ds", "chips", "positions", "embeddings", "faiss_index",
               "chip_gdf", "query_idx", "results", "umap_proj", "scene_id"]:
         st.session_state[k] = None
@@ -282,7 +360,6 @@ if build_btn and st.session_state.selected_scene is not None:
     item     = st.session_state.selected_scene
     scene_id = item.id
 
-    # Check disk cache
     chips_path = cache_path(scene_id, chip_size, stride, "_chips.npy")
     embs_path  = cache_path(scene_id, chip_size, stride, "_embeddings.npy")
     idx_path   = cache_path(scene_id, chip_size, stride, "_faiss.index")
@@ -297,10 +374,8 @@ if build_btn and st.session_state.selected_scene is not None:
         cached    = load_meta(meta_path)
         positions = cached["positions"]
         chip_gdf  = cached["chip_gdf"]
-        log.info(f"Cache hit: {scene_id} | {len(chips)} chips")
 
     else:
-        # Load imagery
         with st.spinner("📥 Loading NAIP COG…"):
             try:
                 ds, ov_level = load_naip_scene(item)
@@ -309,41 +384,27 @@ if build_btn and st.session_state.selected_scene is not None:
                 log.error(traceback.format_exc())
                 st.stop()
 
-        st.success(
-            f"Loaded `{scene_id}` — {ds.shape[1]}×{ds.shape[2]} px "
-            f"(overview level {ov_level})"
-        )
+        st.success(f"Loaded `{scene_id}` — {ds.shape[1]}×{ds.shape[2]} px (overview level {ov_level})")
 
-        # Chip
         with st.spinner("✂️ Chipping imagery…"):
             chips, positions = chip_scene(ds, chip_size=chip_size, stride=stride)
 
-        n_chips = len(chips)
-        if n_chips == 0:
-            st.error(
-                "No chips generated — AOI may be smaller than one chip. "
-                "Reduce chip size or enlarge AOI."
-            )
+        if len(chips) == 0:
+            st.error("No chips generated — AOI may be smaller than one chip. Reduce chip size or draw a larger AOI.")
             st.stop()
-        if n_chips >= config.MAX_CHIPS:
-            st.warning(
-                f"⚠️ Chip count capped at {config.MAX_CHIPS}. "
-                "Increase stride or reduce AOI for a complete index."
-            )
+        if len(chips) >= config.MAX_CHIPS:
+            st.warning(f"⚠️ Chip count capped at {config.MAX_CHIPS}.")
 
-        st.info(f"Generated **{n_chips}** chips  ({chip_size}px, stride {stride}px)")
+        st.info(f"Generated **{len(chips)}** chips  ({chip_size}px, stride {stride}px)")
 
-        # Build chip GeoDataFrame
         with st.spinner("📐 Building chip GeoDataFrame…"):
             chip_gdf = build_chip_geodataframe(positions, ds, chip_size)
 
-        # Embed
         model, device = _load_model()
         progress_bar  = st.progress(0.0, text="🧠 Embedding chips…")
 
         def _cb(done, total):
-            progress_bar.progress(done / total,
-                                  text=f"🧠 Embedding {done}/{total} chips…")
+            progress_bar.progress(done / total, text=f"🧠 Embedding {done}/{total} chips…")
 
         try:
             embs = embed_chips(chips, model, device, progress_callback=_cb)
@@ -354,18 +415,15 @@ if build_btn and st.session_state.selected_scene is not None:
         finally:
             progress_bar.empty()
 
-        # FAISS
         with st.spinner("🗂️ Building FAISS index…"):
             faiss_idx = build_index(embs)
 
-        # Persist
         with st.spinner("💾 Saving to cache…"):
             save_chips(chips, chips_path)
             save_embeddings(embs, embs_path)
             save_index(faiss_idx, idx_path)
             save_meta({"positions": positions, "chip_gdf": chip_gdf}, meta_path)
 
-    # Store in session
     st.session_state.chips       = chips
     st.session_state.positions   = positions
     st.session_state.embeddings  = embs
@@ -376,7 +434,6 @@ if build_btn and st.session_state.selected_scene is not None:
     st.session_state.results     = None
     st.session_state.umap_proj   = None
 
-    # Summary metrics
     mc = st.columns(4)
     mc[0].markdown(f'<div class="metric-card"><div class="val">{len(chips):,}</div><div class="lbl">Chips</div></div>', unsafe_allow_html=True)
     mc[1].markdown(f'<div class="metric-card"><div class="val">{embs.shape[1]:,}</div><div class="lbl">Embed dim</div></div>', unsafe_allow_html=True)
@@ -410,12 +467,10 @@ if st.session_state.chips is not None:
         if st.button("🎲 Random"):
             st.session_state.query_idx = int(np.random.randint(0, n_chips))
             st.rerun()
-
     with qc3:
         chip_rgb = (chips[query_idx].transpose(1, 2, 0) * 255).astype(np.uint8)
         st.image(chip_rgb, caption=f"Query — chip #{query_idx}", width=180)
 
-    # Chip browser
     with st.expander("🖼️ Browse chips (sample)"):
         sample_n   = min(24, n_chips)
         step_size  = max(1, n_chips // sample_n)
@@ -424,14 +479,9 @@ if st.session_state.chips is not None:
         for j, sid in enumerate(sample_ids):
             rgb = (chips[sid].transpose(1, 2, 0) * 255).astype(np.uint8)
             gcols[j % 8].image(rgb, use_container_width=True)
-            gcols[j % 8].markdown(
-                f'<p class="chip-caption">#{sid}</p>', unsafe_allow_html=True
-            )
+            gcols[j % 8].markdown(f'<p class="chip-caption">#{sid}</p>', unsafe_allow_html=True)
 
-    find_btn = st.button(
-        f"🔎 Find top-{top_k} similar chips",
-        type="primary",
-    )
+    find_btn = st.button(f"🔎 Find top-{top_k} similar chips", type="primary")
 
     if find_btn:
         result_indices, result_scores = query_index(faiss_idx, embs, query_idx, top_k)
@@ -464,16 +514,12 @@ if st.session_state.results is not None:
         unsafe_allow_html=True,
     )
 
-    # Chip grid
     n_cols   = min(len(result_indices), 8)
     res_cols = st.columns(n_cols)
     for col, (idx, score) in zip(res_cols, zip(result_indices, result_scores)):
         rgb = (chips[idx].transpose(1, 2, 0) * 255).astype(np.uint8)
         col.image(rgb, use_container_width=True)
-        col.markdown(
-            f'<p class="chip-caption">#{idx}<br>{score:.4f}</p>',
-            unsafe_allow_html=True,
-        )
+        col.markdown(f'<p class="chip-caption">#{idx}<br>{score:.4f}</p>', unsafe_allow_html=True)
 
     tab_map, tab_umap, tab_table, tab_export = st.tabs(
         ["🗺️ Map", "📐 Embedding Space", "📊 Table", "💾 Export"]
@@ -487,18 +533,14 @@ if st.session_state.results is not None:
             c = chip_gdf.dissolve().centroid.iloc[0]
             center = (c.y, c.x)
 
-        with st.spinner("Rendering map…"):
-            fmap = build_result_map(
-                query_idx, result_indices, result_scores, chip_gdf, center
-            )
-        st_folium(fmap, width="100%", height=520, returned_objects=[])
+        fmap = build_result_map(query_idx, result_indices, result_scores, chip_gdf, center)
+        st_folium(fmap, width="100%", height=520, returned_objects=[], key="result_map")
 
     with tab_umap:
         if st.session_state.umap_proj is not None:
             fig = build_umap_scatter(
                 st.session_state.umap_proj,
-                query_idx, result_indices, result_scores,
-                len(chips),
+                query_idx, result_indices, result_scores, len(chips),
             )
             st.plotly_chart(fig, use_container_width=True)
         elif show_umap:
@@ -511,10 +553,8 @@ if st.session_state.results is not None:
             "Rank":       range(1, len(result_indices) + 1),
             "Chip ID":    result_indices,
             "Cosine Sim": [f"{s:.6f}" for s in result_scores],
-            "Pixel Row":  [chip_gdf.loc[chip_gdf["chip_id"] == i, "pixel_row"].iloc[0]
-                           for i in result_indices],
-            "Pixel Col":  [chip_gdf.loc[chip_gdf["chip_id"] == i, "pixel_col"].iloc[0]
-                           for i in result_indices],
+            "Pixel Row":  [chip_gdf.loc[chip_gdf["chip_id"] == i, "pixel_row"].iloc[0] for i in result_indices],
+            "Pixel Col":  [chip_gdf.loc[chip_gdf["chip_id"] == i, "pixel_col"].iloc[0] for i in result_indices],
         })
         st.dataframe(df.set_index("Rank"), use_container_width=True)
 
@@ -536,8 +576,8 @@ if st.session_state.results is not None:
         )
 
         df_export = pd.DataFrame({
-            "Rank":       range(1, len(result_indices) + 1),
-            "Chip ID":    result_indices,
+            "Rank": range(1, len(result_indices) + 1),
+            "Chip ID": result_indices,
             "Cosine Sim": result_scores,
         })
         st.download_button(

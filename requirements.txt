@@ -1,0 +1,30 @@
+# Core
+streamlit>=1.32.0
+python-dotenv>=1.0.0
+
+# PyTorch — CPU build (swap for torch+cu121 on GPU hosts)
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Geospatial
+pystac-client>=0.7.6
+planetary-computer>=1.0.0
+rioxarray>=0.15.0
+geopandas>=0.14.0
+shapely>=2.0.0
+
+# Similarity search
+faiss-cpu>=1.8.0
+
+# Visualization
+folium>=0.16.0
+streamlit-folium>=0.20.0
+plotly>=5.20.0
+
+# Embedding space
+umap-learn>=0.5.6
+
+# General
+numpy>=1.26.0
+pandas>=2.0.0
+pillow>=10.0.0

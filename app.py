@@ -1,7 +1,7 @@
 """
 NAIP Embeddings-Based Similarity Search
 ========================================
-Open-source alternative to ArcGIS Pro 3.7 Embeddings-Based Analysis GeoAI toolset.
+Open-source alternative to Commercial Embeddings-Based Analysis GeoAI toola.
 
 Pipeline
 --------

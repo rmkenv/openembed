@@ -14,7 +14,12 @@ Run
 
 import io
 import logging
+import sys
 import traceback
+from pathlib import Path
+
+# Ensure repo root is on sys.path regardless of where Streamlit Cloud mounts it
+sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
 import pandas as pd

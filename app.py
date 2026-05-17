@@ -1,7 +1,7 @@
 """
 NAIP Embeddings-Based Similarity Search
 ========================================
-Open-source alternative to Commercial Embeddings-Based Analysis GeoAI toola.
+Open-source alternative to Commercial Embeddings-Based Analysis GeoAI tools
 
 Pipeline
 --------
